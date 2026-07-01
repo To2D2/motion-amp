@@ -188,6 +188,7 @@
     background:#0e1512; border:1px solid var(--line); color:var(--dim);
   }
   .preset:active{border-color:var(--signal); color:var(--signal);}
+  .preset.active{background:var(--signal-dim); border-color:var(--signal); color:var(--ink);}
 
   .rowbtns{display:flex; gap:10px; margin-top:22px;}
   .btn{
@@ -263,9 +264,9 @@
   <h2>Amplification Settings</h2>
 
   <div class="field">
-    <div class="field-head"><label>Amplification factor</label><span class="val" id="ampVal">20×</span></div>
-    <input type="range" id="ampSlider" min="1" max="100" step="1" value="20">
-    <div class="field-sub">How strongly the filtered signal is added back to the image. Higher values reveal smaller motion but amplify noise.</div>
+    <div class="field-head"><label>Amplification factor</label><span class="val" id="ampVal">30×</span></div>
+    <input type="range" id="ampSlider" min="1" max="300" step="1" value="30">
+    <div class="field-sub">How strongly the filtered signal is added back to the image. Pair high values with some noise smoothing below.</div>
   </div>
 
   <div class="field">
@@ -283,6 +284,33 @@
     <div class="field-head"><label>Bandwidth</label><span class="val" id="bwVal">0.80 Hz</span></div>
     <input type="range" id="bwSlider" min="0.05" max="8" step="0.05" value="0.8">
     <div class="field-sub">Width of the frequency band around the center frequency that gets amplified.</div>
+  </div>
+
+  <div class="field">
+    <div class="field-head"><label>Noise smoothing</label><span class="val" id="smoothVal">1.5</span></div>
+    <input type="range" id="smoothSlider" min="0" max="6" step="0.5" value="1.5">
+    <div class="field-sub">Blurs the signal the filter reads (not the image you see) to suppress sensor noise, so higher amplification stays clean instead of grainy.</div>
+  </div>
+
+  <div class="field">
+    <div class="field-head"><label>View mode</label></div>
+    <div class="presets">
+      <button class="preset viewbtn active" data-mode="normal">Amplified</button>
+      <button class="preset viewbtn" data-mode="signal">Signal only</button>
+    </div>
+    <div class="field-sub">"Signal only" shows just the detected motion/color change, isolated from the image — useful for confirming a signal is present before dialing in settings.</div>
+  </div>
+
+  <div class="field">
+    <div class="field-head"><label>Playback speed (loaded video)</label><span class="val" id="rateVal">1.00×</span></div>
+    <input type="range" id="rateSlider" min="0.1" max="2" step="0.05" value="1">
+    <div class="field-sub">Slows down playback so fast, high-frequency motion is easier to see. Frequency/bandwidth settings still target the video's real-world Hz.</div>
+    <div class="presets">
+      <button class="preset ratebtn" data-r="0.1">0.1×</button>
+      <button class="preset ratebtn" data-r="0.25">0.25×</button>
+      <button class="preset ratebtn" data-r="0.5">0.5×</button>
+      <button class="preset ratebtn" data-r="1">1×</button>
+    </div>
   </div>
 
   <div class="field">
@@ -328,10 +356,14 @@
   const ampSlider = document.getElementById('ampSlider');
   const freqSlider = document.getElementById('freqSlider');
   const bwSlider = document.getElementById('bwSlider');
+  const smoothSlider = document.getElementById('smoothSlider');
+  const rateSlider = document.getElementById('rateSlider');
   const qualSlider = document.getElementById('qualSlider');
   const ampVal = document.getElementById('ampVal');
   const freqVal = document.getElementById('freqVal');
   const bwVal = document.getElementById('bwVal');
+  const smoothVal = document.getElementById('smoothVal');
+  const rateVal = document.getElementById('rateVal');
   const qualVal = document.getElementById('qualVal');
 
   const QUALS = [
@@ -344,6 +376,9 @@
     amp: parseFloat(ampSlider.value),
     freq: parseFloat(freqSlider.value),
     bw: parseFloat(bwSlider.value),
+    smoothing: parseFloat(smoothSlider.value),
+    viewMode: 'normal',
+    playbackRate: parseFloat(rateSlider.value),
     qualIdx: parseInt(qualSlider.value,10)
   };
 
@@ -377,7 +412,7 @@
 
   // Updates one temporal low-pass state texture: L_new = L_old + alpha*(current - L_old)
   const UPDATE_SRC = `
-    precision mediump float;
+    precision __PRECISION__ float;
     varying vec2 v_uv;
     uniform sampler2D u_current;
     uniform sampler2D u_prevLow;
@@ -389,21 +424,41 @@
     }
   `;
 
+  // 5-tap linear-sampling approximation of a Gaussian blur (single axis per pass).
+  const BLUR_SRC = `
+    precision __PRECISION__ float;
+    varying vec2 v_uv;
+    uniform sampler2D u_tex;
+    uniform vec2 u_dir;
+    void main(){
+      vec4 c  = texture2D(u_tex, v_uv) * 0.2270270270;
+      c += texture2D(u_tex, v_uv + u_dir*1.3846153846) * 0.3162162162;
+      c += texture2D(u_tex, v_uv - u_dir*1.3846153846) * 0.3162162162;
+      c += texture2D(u_tex, v_uv + u_dir*3.2307692308) * 0.0702702703;
+      c += texture2D(u_tex, v_uv - u_dir*3.2307692308) * 0.0702702703;
+      gl_FragColor = c;
+    }
+  `;
+
   // band = lowHigh - lowLow  (difference of low-pass filters => band-pass)
-  // output = current + amp * band
+  // normal mode:  output = current + amp * band
+  // signal mode:  output = mid-gray + amp * band   (isolates just the detected change)
   const COMPOSE_SRC = `
-    precision mediump float;
+    precision __PRECISION__ float;
     varying vec2 v_uv;
     uniform sampler2D u_current;
     uniform sampler2D u_lowHigh;
     uniform sampler2D u_lowLow;
     uniform float u_amp;
+    uniform float u_mode;
     void main(){
       vec3 cur = texture2D(u_current, v_uv).rgb;
       vec3 lh = texture2D(u_lowHigh, v_uv).rgb;
       vec3 ll = texture2D(u_lowLow, v_uv).rgb;
       vec3 band = lh - ll;
-      vec3 outc = cur + u_amp * band;
+      vec3 normalOut = cur + u_amp * band;
+      vec3 signalOut = vec3(0.5) + u_amp * band * 0.5;
+      vec3 outc = mix(normalOut, signalOut, u_mode);
       gl_FragColor = vec4(clamp(outc, 0.0, 1.0), 1.0);
     }
   `;
@@ -432,10 +487,52 @@
     return prog;
   }
 
-  let updateProgram, composeProgram, quadBuffer;
-  let uUpd = {}, uComp = {};
+  let updateProgram, composeProgram, blurProgram, quadBuffer;
+  let uUpd = {}, uComp = {}, uBlur = {};
   let curTex = null;
   let L1 = null, L2 = null; // {read:{tex,fb}, write:{tex,fb}}
+  let blurTexA = null, blurFBA = null, blurTexB = null, blurFBB = null;
+  let stateFmt = {type:null, filter:null, label:'8-bit'};
+
+  function bestFragPrecision(gl){
+    try{
+      const fmt = gl.getShaderPrecisionFormat && gl.getShaderPrecisionFormat(gl.FRAGMENT_SHADER, gl.HIGH_FLOAT);
+      return (fmt && fmt.precision > 0) ? 'highp' : 'mediump';
+    }catch(e){ return 'mediump'; }
+  }
+
+  function detectStateFormat(gl){
+    function testComplete(type){
+      try{
+        const t = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, t);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 4, 4, 0, gl.RGBA, type, null);
+        const fb = gl.createFramebuffer();
+        gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+        gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, t, 0);
+        const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.deleteFramebuffer(fb);
+        gl.deleteTexture(t);
+        return ok;
+      }catch(e){ return false; }
+    }
+    const extF = gl.getExtension('OES_texture_float');
+    if(extF && testComplete(gl.FLOAT)){
+      const linear = !!gl.getExtension('OES_texture_float_linear');
+      return {type: gl.FLOAT, filter: linear ? gl.LINEAR : gl.NEAREST, label:'32-bit float'};
+    }
+    const extH = gl.getExtension('OES_texture_half_float');
+    if(extH && testComplete(extH.HALF_FLOAT_OES)){
+      const linear = !!gl.getExtension('OES_texture_half_float_linear');
+      return {type: extH.HALF_FLOAT_OES, filter: linear ? gl.LINEAR : gl.NEAREST, label:'16-bit float'};
+    }
+    return {type: gl.UNSIGNED_BYTE, filter: gl.LINEAR, label:'8-bit'};
+  }
 
   function initGLContext(){
     gl = canvas.getContext('webgl', {
@@ -448,8 +545,13 @@
 
     gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
 
-    updateProgram = linkProgram(gl, VERT_SRC, UPDATE_SRC);
-    composeProgram = linkProgram(gl, VERT_SRC, COMPOSE_SRC);
+    const FRAG_PREC = bestFragPrecision(gl);
+    stateFmt = detectStateFormat(gl);
+    const finalize = src => src.replace(/__PRECISION__/g, FRAG_PREC);
+
+    updateProgram = linkProgram(gl, VERT_SRC, finalize(UPDATE_SRC));
+    composeProgram = linkProgram(gl, VERT_SRC, finalize(COMPOSE_SRC));
+    blurProgram = linkProgram(gl, VERT_SRC, finalize(BLUR_SRC));
 
     quadBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
@@ -466,30 +568,41 @@
     uComp.lowHigh = gl.getUniformLocation(composeProgram, 'u_lowHigh');
     uComp.lowLow  = gl.getUniformLocation(composeProgram, 'u_lowLow');
     uComp.amp     = gl.getUniformLocation(composeProgram, 'u_amp');
+    uComp.mode    = gl.getUniformLocation(composeProgram, 'u_mode');
     uComp.pos     = gl.getAttribLocation(composeProgram, 'a_pos');
+
+    uBlur.tex = gl.getUniformLocation(blurProgram, 'u_tex');
+    uBlur.dir = gl.getUniformLocation(blurProgram, 'u_dir');
+    uBlur.pos = gl.getAttribLocation(blurProgram, 'a_pos');
   }
 
-  function createTex(w, h, data){
+  function createTex(w, h, data, type, filter){
+    type = type || gl.UNSIGNED_BYTE;
+    filter = filter || gl.LINEAR;
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
     if(data){
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, data);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, type, data);
     } else {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, type, null);
     }
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     return tex;
   }
-  function createFBOPair(w, h){
+  function makeFBForTex(tex){
+    const fb = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return fb;
+  }
+  function createFBOPair(w, h, type, filter){
     function one(){
-      const tex = createTex(w, h, null);
-      const fb = gl.createFramebuffer();
-      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
-      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      const tex = createTex(w, h, null, type, filter);
+      const fb = makeFBForTex(tex);
       return {tex, fb};
     }
     return { read: one(), write: one() };
@@ -504,9 +617,13 @@
     procW = w; procH = h;
     canvas.width = w;
     canvas.height = h;
-    curTex = createTex(w, h, null);
-    L1 = createFBOPair(w, h);
-    L2 = createFBOPair(w, h);
+    curTex = createTex(w, h, null, gl.UNSIGNED_BYTE, gl.LINEAR);
+    L1 = createFBOPair(w, h, stateFmt.type, stateFmt.filter);
+    L2 = createFBOPair(w, h, stateFmt.type, stateFmt.filter);
+    blurTexA = createTex(w, h, null, gl.UNSIGNED_BYTE, gl.LINEAR);
+    blurFBA = makeFBForTex(blurTexA);
+    blurTexB = createTex(w, h, null, gl.UNSIGNED_BYTE, gl.LINEAR);
+    blurFBB = makeFBForTex(blurTexB);
     needsInit = true;
   }
 
@@ -522,34 +639,54 @@
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
   }
 
-  function copyInto(targetFB){
-    // Runs the update shader with alpha=1, which just copies u_current straight through.
+  function copyInto(targetFB, srcTex){
+    srcTex = srcTex || curTex;
+    // Runs the update shader with alpha=1, which just copies srcTex straight through.
     gl.bindFramebuffer(gl.FRAMEBUFFER, targetFB);
     gl.viewport(0,0,procW,procH);
     gl.useProgram(updateProgram);
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, curTex);
+    gl.bindTexture(gl.TEXTURE_2D, srcTex);
     gl.uniform1i(uUpd.current, 0);
     gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, curTex);
+    gl.bindTexture(gl.TEXTURE_2D, srcTex);
     gl.uniform1i(uUpd.prevLow, 1);
     gl.uniform1f(uUpd.alpha, 1.0);
     drawQuad(uUpd.pos);
   }
 
-  function seedFilters(){
-    uploadCurrentFrame();
-    copyInto(L1.read.fb);
-    copyInto(L2.read.fb);
-    needsInit = false;
+  function computeFilterInput(){
+    if(settings.smoothing <= 0) return curTex;
+    const texelX = 1/procW, texelY = 1/procH;
+    const spread = settings.smoothing;
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, blurFBA);
+    gl.viewport(0,0,procW,procH);
+    gl.useProgram(blurProgram);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, curTex);
+    gl.uniform1i(uBlur.tex, 0);
+    gl.uniform2f(uBlur.dir, texelX*spread, 0);
+    drawQuad(uBlur.pos);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, blurFBB);
+    gl.viewport(0,0,procW,procH);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, blurTexA);
+    gl.uniform1i(uBlur.tex, 0);
+    gl.uniform2f(uBlur.dir, 0, texelY*spread);
+    drawQuad(uBlur.pos);
+
+    return blurTexB;
   }
 
   function renderFrame(dt){
     uploadCurrentFrame();
+    const filterInputTex = computeFilterInput();
 
     if(needsInit){
-      copyInto(L1.read.fb);
-      copyInto(L2.read.fb);
+      copyInto(L1.read.fb, filterInputTex);
+      copyInto(L2.read.fb, filterInputTex);
       needsInit = false;
     }
 
@@ -563,7 +700,7 @@
     gl.viewport(0,0,procW,procH);
     gl.useProgram(updateProgram);
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, curTex);
+    gl.bindTexture(gl.TEXTURE_2D, filterInputTex);
     gl.uniform1i(uUpd.current, 0);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, L1.read.tex);
@@ -577,7 +714,7 @@
     gl.viewport(0,0,procW,procH);
     gl.useProgram(updateProgram);
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, curTex);
+    gl.bindTexture(gl.TEXTURE_2D, filterInputTex);
     gl.uniform1i(uUpd.current, 0);
     gl.activeTexture(gl.TEXTURE1);
     gl.bindTexture(gl.TEXTURE_2D, L2.read.tex);
@@ -600,6 +737,7 @@
     gl.bindTexture(gl.TEXTURE_2D, L2.read.tex);
     gl.uniform1i(uComp.lowLow, 2);
     gl.uniform1f(uComp.amp, settings.amp);
+    gl.uniform1f(uComp.mode, settings.viewMode === 'signal' ? 1.0 : 0.0);
     drawQuad(uComp.pos);
   }
 
@@ -654,19 +792,36 @@
   // Main loop
   // ---------------------------------------------------------------
   let lastT = null;
+  let lastVideoTime = null;
   let fpsSmooth = 0;
   let rvfcId = null, rafId = null;
 
   function loopStep(now){
     if(!running) return;
     if(lastT == null) lastT = now;
-    let dt = (now - lastT) / 1000;
+    let wallDt = (now - lastT) / 1000;
     lastT = now;
-    dt = Math.max(0.004, Math.min(dt, 0.5)); // clamp for stability
+    wallDt = Math.max(0.004, Math.min(wallDt, 0.5));
 
-    const instFps = 1/dt;
+    const instFps = 1/wallDt;
     fpsSmooth = fpsSmooth === 0 ? instFps : (fpsSmooth*0.9 + instFps*0.1);
     fpsVal.textContent = Math.round(fpsSmooth);
+
+    let dt = wallDt;
+    if(sourceMode === 'file'){
+      // Use the video's own content-time delta rather than wall-clock time, so that
+      // slowing playbackRate down gives you more real time per cycle without shifting
+      // which frequency the filter is tuned to.
+      if(lastVideoTime == null) lastVideoTime = video.currentTime;
+      let vdt = video.currentTime - lastVideoTime;
+      lastVideoTime = video.currentTime;
+      if(vdt <= 0 || vdt > 0.5){
+        // Looped back to the start (or a scrub/stall) — reseed the filter and use a nominal dt just for this frame.
+        needsInit = true;
+        vdt = 1/30;
+      }
+      dt = vdt;
+    }
 
     try{
       renderFrame(dt);
@@ -767,6 +922,7 @@
     video.loop = true;
     video.muted = true;
     video.playsInline = true;
+    lastVideoTime = null;
 
     await new Promise((res, rej)=>{
       video.onloadedmetadata = ()=>res();
@@ -788,6 +944,7 @@
     curTimeLbl.textContent = '00:00';
 
     await startApp();
+    video.playbackRate = settings.playbackRate;
   }
 
   async function switchToCamera(){
@@ -813,9 +970,34 @@
     ampVal.textContent = settings.amp + '×';
     freqVal.textContent = fmtHz(settings.freq);
     bwVal.textContent = fmtHz(settings.bw);
+    smoothVal.textContent = settings.smoothing.toFixed(1);
+    rateVal.textContent = settings.playbackRate.toFixed(2) + '×';
     qualVal.textContent = QUALS[settings.qualIdx].label;
   }
   syncLabels();
+
+  smoothSlider.addEventListener('input', ()=>{
+    settings.smoothing = parseFloat(smoothSlider.value);
+    syncLabels();
+  });
+
+  document.querySelectorAll('.viewbtn').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      settings.viewMode = btn.dataset.mode;
+      document.querySelectorAll('.viewbtn').forEach(b=>b.classList.toggle('active', b===btn));
+    });
+  });
+
+  function setPlaybackRate(r){
+    settings.playbackRate = r;
+    rateSlider.value = r;
+    syncLabels();
+    if(sourceMode === 'file') video.playbackRate = r;
+  }
+  rateSlider.addEventListener('input', ()=>{ setPlaybackRate(parseFloat(rateSlider.value)); });
+  document.querySelectorAll('.ratebtn').forEach(btn=>{
+    btn.addEventListener('click', ()=> setPlaybackRate(parseFloat(btn.dataset.r)));
+  });
 
   ampSlider.addEventListener('input', ()=>{
     settings.amp = parseFloat(ampSlider.value);
@@ -882,7 +1064,10 @@
     video.currentTime = t;
   });
   video.addEventListener('seeked', ()=>{
-    if(sourceMode === 'file') seekPreviewRender();
+    if(sourceMode === 'file'){
+      lastVideoTime = video.currentTime;
+      seekPreviewRender();
+    }
   });
   ['pointerup','touchend','change'].forEach(evt=>{
     scrubRange.addEventListener(evt, ()=>{ isScrubbing = false; });
@@ -1012,4 +1197,4 @@
 </script>
 </body>
 </html>
-Displaying motion-amplifier.
+Displaying motion-amplifier.html. 
