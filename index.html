@@ -63,33 +63,63 @@
   #stats b{color:var(--ink); font-weight:600;}
 
   /* ---------- bottom control dock ---------- */
-  #dock{
+  #bottomBar{
     position:fixed; left:0; right:0; bottom:0;
-    display:flex; align-items:center; justify-content:center; gap:14px;
-    padding: 16px 20px max(16px, env(safe-area-inset-bottom));
     z-index:20;
-    background:linear-gradient(to top, rgba(0,0,0,.7), transparent);
+    background:linear-gradient(to top, rgba(0,0,0,.75), transparent);
+    padding-top:8px;
+  }
+  #scrubBar{
+    display:none;
+    align-items:center; gap:10px;
+    padding: 0 20px 8px 20px;
+  }
+  #scrubBar.on{display:flex;}
+  .scrubIcon{
+    width:28px; height:28px; border-radius:50%; flex-shrink:0;
+    border:1px solid var(--line);
+    background:rgba(18,23,21,.85); color:var(--signal);
+    display:flex; align-items:center; justify-content:center; font-size:12px;
+  }
+  .scrubIcon:active{background:var(--signal-dim);}
+  .timeLbl{font-size:10px; color:var(--dim); flex-shrink:0; min-width:32px; text-align:center; letter-spacing:.03em;}
+  #scrubRange{flex:1; height:28px; margin:0;}
+  #scrubRange::-webkit-slider-thumb{width:14px; height:14px; margin-top:-6px;}
+  #dock{
+    display:flex; align-items:center; justify-content:center; gap:10px;
+    padding: 8px 20px max(16px, env(safe-area-inset-bottom));
   }
   .iconbtn{
-    width:52px; height:52px; border-radius:50%;
+    width:46px; height:46px; border-radius:50%;
     border:1px solid var(--line);
     background:rgba(18,23,21,.85);
     color:var(--ink);
     display:flex; align-items:center; justify-content:center;
-    font-size:20px;
+    font-size:18px;
     -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+    flex-shrink:0;
   }
   .iconbtn:active{background:var(--signal-dim); border-color:var(--signal);}
+  .iconbtn:disabled{opacity:.3;}
   #powerBtn{
-    width:68px; height:68px;
+    width:62px; height:62px;
     border:2px solid var(--signal);
     background:rgba(92,255,177,.08);
     color:var(--signal);
-    font-size:22px;
+    font-size:20px;
   }
   #powerBtn.live{
     background:var(--signal); color:#04120b; box-shadow:0 0 22px rgba(92,255,177,.5);
   }
+  #recordBtn{color:var(--warn); border-color:#4a2a24;}
+  #recordBtn.active{
+    background:var(--warn); color:#1a0705; border-color:var(--warn);
+    animation:recpulse 1s ease-in-out infinite;
+  }
+  @keyframes recpulse{ 0%,100%{box-shadow:0 0 0 rgba(255,107,92,.6)} 50%{box-shadow:0 0 16px rgba(255,107,92,.8)} }
+  #srcLabel{color:var(--signal);}
+  #recTimer{display:none; color:var(--warn);}
+  #recTimer.on{display:inline;}
 
   /* ---------- settings sheet ---------- */
   #overlay{
@@ -203,16 +233,29 @@
 <div id="topbar">
   <div class="brand"><span class="dot"></span>PULSE</div>
   <div id="stats">
+    <span id="srcLabel">LIVE</span>
     <span><b id="fpsVal">--</b> fps</span>
     <span><b id="resVal">--</b></span>
+    <span id="recTimer">● REC 00:00</span>
   </div>
 </div>
 
-<div id="dock">
-  <button class="iconbtn" id="flipBtn" title="Switch camera">⟲</button>
-  <button class="iconbtn" id="powerBtn" title="Start / stop">▶</button>
-  <button class="iconbtn" id="settingsBtn" title="Settings">⚙</button>
+<div id="bottomBar">
+  <div id="scrubBar">
+    <button class="scrubIcon" id="scrubPlayBtn" title="Play / pause">▶</button>
+    <span class="timeLbl" id="curTimeLbl">00:00</span>
+    <input type="range" id="scrubRange" min="0" max="1" step="0.001" value="0">
+    <span class="timeLbl" id="durLbl">00:00</span>
+  </div>
+  <div id="dock">
+    <button class="iconbtn" id="loadBtn" title="Load video">🎬</button>
+    <button class="iconbtn" id="flipBtn" title="Switch camera">⟲</button>
+    <button class="iconbtn" id="powerBtn" title="Start / stop">▶</button>
+    <button class="iconbtn" id="recordBtn" title="Record">⏺</button>
+    <button class="iconbtn" id="settingsBtn" title="Settings">⚙</button>
+  </div>
 </div>
+<input type="file" id="loadInput" accept="video/*" style="display:none">
 
 <div id="overlay"></div>
 <div id="sheet">
@@ -266,7 +309,17 @@
   const resVal = document.getElementById('resVal');
   const powerBtn = document.getElementById('powerBtn');
   const flipBtn = document.getElementById('flipBtn');
+  const loadBtn = document.getElementById('loadBtn');
+  const loadInput = document.getElementById('loadInput');
+  const recordBtn = document.getElementById('recordBtn');
+  const srcLabel = document.getElementById('srcLabel');
+  const recTimer = document.getElementById('recTimer');
   const settingsBtn = document.getElementById('settingsBtn');
+  const scrubBar = document.getElementById('scrubBar');
+  const scrubRange = document.getElementById('scrubRange');
+  const scrubPlayBtn = document.getElementById('scrubPlayBtn');
+  const curTimeLbl = document.getElementById('curTimeLbl');
+  const durLbl = document.getElementById('durLbl');
   const overlay = document.getElementById('overlay');
   const sheet = document.getElementById('sheet');
   const closeSheetBtn = document.getElementById('closeSheetBtn');
@@ -300,6 +353,9 @@
   let gl = null;
   let procW = 0, procH = 0;
   let needsInit = true; // whether filter state must be seeded from current frame
+  let sourceMode = 'camera'; // 'camera' | 'file'
+  let loadedFileURL = null;
+  let isScrubbing = false;
 
   function showError(msg){
     errBox.textContent = msg;
@@ -620,6 +676,11 @@
       return;
     }
 
+    if(sourceMode === 'file' && !isScrubbing){
+      scrubRange.value = video.currentTime;
+      curTimeLbl.textContent = formatTimer(video.currentTime * 1000);
+    }
+
     scheduleNext();
   }
 
@@ -635,19 +696,26 @@
     hint.style.display = 'none';
     try{
       if(!gl) initGLContext();
-      await startCamera();
+      if(sourceMode === 'camera'){
+        await startCamera();
+        srcLabel.textContent = 'LIVE';
+      } else {
+        await video.play();
+      }
       running = true;
       lastT = null;
       powerBtn.classList.add('live');
       powerBtn.textContent = '■';
+      scrubPlayBtn.textContent = '⏸';
       scheduleNext();
     }catch(e){
       running = false;
       powerBtn.classList.remove('live');
       powerBtn.textContent = '▶';
+      scrubPlayBtn.textContent = '▶';
       hint.style.display = 'block';
       let msg = e.message || String(e);
-      if(location.protocol !== 'https:' && location.hostname !== 'localhost'){
+      if(sourceMode === 'camera' && location.protocol !== 'https:' && location.hostname !== 'localhost'){
         msg = 'Camera access requires HTTPS (or localhost). Host this file over HTTPS to use it. ' + msg;
       }
       showError(msg);
@@ -658,10 +726,82 @@
     running = false;
     powerBtn.classList.remove('live');
     powerBtn.textContent = '▶';
+    scrubPlayBtn.textContent = '▶';
     if(rvfcId && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(rvfcId);
     if(rafId) cancelAnimationFrame(rafId);
+    if(recording) stopRecording();
+    if(sourceMode === 'camera'){
+      stopCamera();
+      hint.style.display = 'block';
+    } else {
+      video.pause();
+    }
+  }
+
+  function getReliableDuration(video){
+    if(isFinite(video.duration) && video.duration > 0) return Promise.resolve(video.duration);
+    // Some browsers report Infinity for duration on blob-sourced video until probed like this.
+    return new Promise((resolve)=>{
+      function onDur(){
+        video.removeEventListener('durationchange', onDur);
+        video.currentTime = 0;
+        resolve(isFinite(video.duration) ? video.duration : 0);
+      }
+      video.addEventListener('durationchange', onDur);
+      video.currentTime = 1e101;
+    });
+  }
+
+  async function loadVideoFile(file){
+    stopApp();
     stopCamera();
-    hint.style.display = 'block';
+    clearError();
+    hint.style.display = 'none';
+
+    if(loadedFileURL) URL.revokeObjectURL(loadedFileURL);
+    loadedFileURL = URL.createObjectURL(file);
+
+    sourceMode = 'file';
+    video.srcObject = null;
+    video.src = loadedFileURL;
+    video.loop = true;
+    video.muted = true;
+    video.playsInline = true;
+
+    await new Promise((res, rej)=>{
+      video.onloadedmetadata = ()=>res();
+      video.onerror = ()=>rej(new Error('Could not load that video file.'));
+    });
+
+    if(!gl) initGLContext();
+    allocateBuffers(video.videoWidth, video.videoHeight);
+    resVal.textContent = video.videoWidth + '×' + video.videoHeight;
+    srcLabel.textContent = 'FILE · ' + (file.name.length > 16 ? file.name.slice(0,14)+'…' : file.name);
+    flipBtn.disabled = true;
+
+    scrubBar.classList.add('on');
+    const dur = await getReliableDuration(video);
+    scrubRange.min = 0;
+    scrubRange.max = dur;
+    scrubRange.value = 0;
+    durLbl.textContent = formatTimer(dur * 1000);
+    curTimeLbl.textContent = '00:00';
+
+    await startApp();
+  }
+
+  async function switchToCamera(){
+    stopApp();
+    if(loadedFileURL){ URL.revokeObjectURL(loadedFileURL); loadedFileURL = null; }
+    video.removeAttribute('src');
+    video.load();
+    sourceMode = 'camera';
+    flipBtn.disabled = false;
+    srcLabel.textContent = 'LIVE';
+    loadBtn.textContent = '🎬';
+    loadBtn.title = 'Load video';
+    scrubBar.classList.remove('on');
+    await startApp();
   }
 
   // ---------------------------------------------------------------
@@ -723,12 +863,145 @@
     if(running) stopApp(); else startApp();
   });
 
+  scrubPlayBtn.addEventListener('click', ()=>{
+    if(running) stopApp(); else startApp();
+  });
+
+  function seekPreviewRender(){
+    // While paused/scrubbing, force one render at the new time so the canvas
+    // reflects the amplified frame at that point instead of freezing on the old one.
+    if(!gl) return;
+    needsInit = true; // reseed the temporal filters at the new position to avoid a jump artifact
+    try{ renderFrame(1/30); }catch(e){ /* ignore mid-seek errors */ }
+  }
+
+  scrubRange.addEventListener('pointerdown', ()=>{ isScrubbing = true; });
+  scrubRange.addEventListener('input', ()=>{
+    const t = parseFloat(scrubRange.value);
+    curTimeLbl.textContent = formatTimer(t*1000);
+    video.currentTime = t;
+  });
+  video.addEventListener('seeked', ()=>{
+    if(sourceMode === 'file') seekPreviewRender();
+  });
+  ['pointerup','touchend','change'].forEach(evt=>{
+    scrubRange.addEventListener(evt, ()=>{ isScrubbing = false; });
+  });
+
   flipBtn.addEventListener('click', async ()=>{
+    if(sourceMode === 'file') return; // disabled in file mode, handled by loadBtn/back flow
     facingMode = (facingMode === 'environment') ? 'user' : 'environment';
     if(running){
       stopCamera();
       try{ await startCamera(); }catch(e){ showError(e.message); }
     }
+  });
+
+  loadBtn.addEventListener('click', ()=>{
+    if(sourceMode === 'file'){
+      // Already viewing a loaded file — tapping again returns to the live camera.
+      switchToCamera().catch(e=>showError(e.message));
+      return;
+    }
+    loadInput.click();
+  });
+
+  loadInput.addEventListener('change', async (e)=>{
+    const file = e.target.files[0];
+    loadInput.value = '';
+    if(!file) return;
+    try{
+      await loadVideoFile(file);
+      loadBtn.textContent = '📷';
+      loadBtn.title = 'Back to live camera';
+    }catch(err){
+      showError(err.message);
+    }
+  });
+
+  // ---------------------------------------------------------------
+  // Recording (captures the amplified canvas output)
+  // ---------------------------------------------------------------
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let recording = false;
+  let recStartMs = 0;
+  let recTimerHandle = null;
+
+  function pickRecordMimeType(){
+    const candidates = [
+      'video/mp4;codecs=h264',
+      'video/mp4',
+      'video/webm;codecs=vp9',
+      'video/webm;codecs=vp8',
+      'video/webm'
+    ];
+    for(const c of candidates){
+      if(window.MediaRecorder && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(c)) return c;
+    }
+    return '';
+  }
+
+  function formatTimer(ms){
+    const s = Math.floor(ms/1000);
+    const mm = String(Math.floor(s/60)).padStart(2,'0');
+    const ss = String(s%60).padStart(2,'0');
+    return mm + ':' + ss;
+  }
+
+  function startRecording(){
+    if(!running){ showError('Start the camera or load a video before recording.'); return; }
+    if(!window.MediaRecorder){ showError('This browser does not support recording (MediaRecorder unavailable).'); return; }
+    if(!canvas.captureStream){ showError('This browser does not support capturing the canvas as video.'); return; }
+
+    let canvasStream;
+    try{
+      const fps = Math.min(60, Math.max(15, Math.round(fpsSmooth) || 30));
+      canvasStream = canvas.captureStream(fps);
+    }catch(e){ showError('Could not capture canvas: ' + e.message); return; }
+
+    const mimeType = pickRecordMimeType();
+    try{
+      mediaRecorder = mimeType ? new MediaRecorder(canvasStream, {mimeType}) : new MediaRecorder(canvasStream);
+    }catch(e){ showError('Recording not supported: ' + e.message); return; }
+
+    recordedChunks = [];
+    mediaRecorder.ondataavailable = (e)=>{ if(e.data && e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = ()=>{
+      const type = mediaRecorder.mimeType || 'video/webm';
+      const blob = new Blob(recordedChunks, {type});
+      const url = URL.createObjectURL(blob);
+      const ext = type.includes('mp4') ? 'mp4' : 'webm';
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'pulse-amplified-' + Date.now() + '.' + ext;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url), 15000);
+    };
+
+    mediaRecorder.start();
+    recording = true;
+    recStartMs = performance.now();
+    recordBtn.classList.add('active');
+    recTimer.classList.add('on');
+    recTimer.textContent = '● REC 00:00';
+    recTimerHandle = setInterval(()=>{
+      recTimer.textContent = '● REC ' + formatTimer(performance.now() - recStartMs);
+    }, 500);
+  }
+
+  function stopRecording(){
+    if(mediaRecorder && recording) mediaRecorder.stop();
+    recording = false;
+    recordBtn.classList.remove('active');
+    recTimer.classList.remove('on');
+    if(recTimerHandle){ clearInterval(recTimerHandle); recTimerHandle = null; }
+  }
+
+  recordBtn.addEventListener('click', ()=>{
+    if(recording) stopRecording(); else startRecording();
   });
 
   window.addEventListener('resize', ()=>{
@@ -739,4 +1012,4 @@
 </script>
 </body>
 </html>
-Displaying motion-amplifier.html.
+Displaying motion-amplifier.
