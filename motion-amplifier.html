@@ -1,0 +1,741 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Pulse — Motion Amplifier</title>
+<style>
+  :root{
+    --bg:#0a0d0c;
+    --panel:#121715;
+    --line:#22302b;
+    --ink:#e8f2ee;
+    --dim:#7f9891;
+    --signal:#5CFFB1;
+    --signal-dim:#2c6b4e;
+    --warn:#ff6b5c;
+    --mono: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  }
+  *{box-sizing:border-box; -webkit-tap-highlight-color:transparent;}
+  html,body{
+    margin:0; padding:0; width:100%; height:100%;
+    background:var(--bg); color:var(--ink);
+    font-family:var(--mono);
+    overflow:hidden;
+    overscroll-behavior:none;
+  }
+  #stage{
+    position:fixed; inset:0;
+    display:flex; align-items:center; justify-content:center;
+    background:#000;
+  }
+  video{display:none;}
+  canvas{
+    width:100%; height:100%;
+    object-fit:contain;
+    background:#000;
+  }
+
+  /* ---------- top status bar ---------- */
+  #topbar{
+    position:fixed; top:0; left:0; right:0;
+    display:flex; align-items:center; justify-content:space-between;
+    padding: max(10px, env(safe-area-inset-top)) 14px 10px 14px;
+    z-index:20;
+    background:linear-gradient(to bottom, rgba(0,0,0,.65), transparent);
+    pointer-events:none;
+  }
+  #topbar > *{pointer-events:auto;}
+  .brand{
+    font-size:12px; letter-spacing:.14em; text-transform:uppercase; color:var(--signal);
+    display:flex; align-items:center; gap:6px;
+  }
+  .brand .dot{
+    width:7px; height:7px; border-radius:50%; background:var(--signal);
+    box-shadow:0 0 8px var(--signal);
+    animation:pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse{ 0%,100%{opacity:1} 50%{opacity:.25} }
+  #stats{
+    font-size:11px; color:var(--dim); letter-spacing:.05em;
+    display:flex; gap:12px;
+  }
+  #stats b{color:var(--ink); font-weight:600;}
+
+  /* ---------- bottom control dock ---------- */
+  #dock{
+    position:fixed; left:0; right:0; bottom:0;
+    display:flex; align-items:center; justify-content:center; gap:14px;
+    padding: 16px 20px max(16px, env(safe-area-inset-bottom));
+    z-index:20;
+    background:linear-gradient(to top, rgba(0,0,0,.7), transparent);
+  }
+  .iconbtn{
+    width:52px; height:52px; border-radius:50%;
+    border:1px solid var(--line);
+    background:rgba(18,23,21,.85);
+    color:var(--ink);
+    display:flex; align-items:center; justify-content:center;
+    font-size:20px;
+    -webkit-backdrop-filter:blur(6px); backdrop-filter:blur(6px);
+  }
+  .iconbtn:active{background:var(--signal-dim); border-color:var(--signal);}
+  #powerBtn{
+    width:68px; height:68px;
+    border:2px solid var(--signal);
+    background:rgba(92,255,177,.08);
+    color:var(--signal);
+    font-size:22px;
+  }
+  #powerBtn.live{
+    background:var(--signal); color:#04120b; box-shadow:0 0 22px rgba(92,255,177,.5);
+  }
+
+  /* ---------- settings sheet ---------- */
+  #overlay{
+    position:fixed; inset:0; z-index:30;
+    background:rgba(4,6,5,.55);
+    -webkit-backdrop-filter:blur(2px); backdrop-filter:blur(2px);
+    opacity:0; pointer-events:none;
+    transition:opacity .2s ease;
+  }
+  #overlay.open{opacity:1; pointer-events:auto;}
+
+  #sheet{
+    position:fixed; left:0; right:0; bottom:0; z-index:31;
+    background:var(--panel);
+    border-top:1px solid var(--line);
+    border-radius:18px 18px 0 0;
+    padding: 18px 20px max(22px, env(safe-area-inset-bottom));
+    transform:translateY(105%);
+    transition:transform .28s cubic-bezier(.2,.8,.2,1);
+    max-height:82vh; overflow-y:auto;
+  }
+  #sheet.open{transform:translateY(0);}
+  .grabber{
+    width:36px; height:4px; border-radius:2px; background:var(--line);
+    margin:0 auto 16px auto;
+  }
+  #sheet h2{
+    font-size:13px; text-transform:uppercase; letter-spacing:.16em;
+    color:var(--signal); margin:0 0 18px 0; font-weight:600;
+  }
+  .field{margin-bottom:20px;}
+  .field-head{
+    display:flex; justify-content:space-between; align-items:baseline;
+    margin-bottom:8px;
+  }
+  .field-head label{
+    font-size:12px; color:var(--dim); letter-spacing:.06em; text-transform:uppercase;
+  }
+  .field-head .val{
+    font-size:14px; color:var(--ink); font-weight:600;
+  }
+  .field-sub{font-size:10px; color:var(--dim); margin-top:5px; letter-spacing:.03em;}
+
+  input[type=range]{
+    -webkit-appearance:none; appearance:none;
+    width:100%; height:34px; background:transparent;
+  }
+  input[type=range]::-webkit-slider-runnable-track{
+    height:4px; background:var(--line); border-radius:2px;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;
+    width:20px; height:20px; margin-top:-8px; border-radius:50%;
+    background:var(--signal); border:3px solid #04120b;
+    box-shadow:0 0 0 1px var(--signal);
+  }
+  input[type=range]::-moz-range-track{height:4px; background:var(--line); border-radius:2px;}
+  input[type=range]::-moz-range-thumb{
+    width:14px; height:14px; border-radius:50%; background:var(--signal); border:none;
+  }
+
+  .presets{display:flex; gap:8px; flex-wrap:wrap; margin-top:6px;}
+  .preset{
+    font-family:var(--mono); font-size:11px; letter-spacing:.03em;
+    padding:7px 11px; border-radius:8px;
+    background:#0e1512; border:1px solid var(--line); color:var(--dim);
+  }
+  .preset:active{border-color:var(--signal); color:var(--signal);}
+
+  .rowbtns{display:flex; gap:10px; margin-top:22px;}
+  .btn{
+    flex:1; padding:13px; border-radius:10px; text-align:center;
+    font-family:var(--mono); font-size:12px; letter-spacing:.06em; text-transform:uppercase;
+    border:1px solid var(--line); background:#0e1512; color:var(--ink);
+  }
+  .btn.primary{background:var(--signal); color:#04120b; border-color:var(--signal); font-weight:700;}
+  .btn.ghost{color:var(--warn); border-color:#3a1f1c;}
+
+  #hint{
+    position:fixed; left:50%; top:50%; transform:translate(-50%,-50%);
+    z-index:15; color:var(--dim); font-size:12px; text-align:center;
+    letter-spacing:.04em; line-height:1.7; padding:0 30px;
+    pointer-events:none;
+  }
+  #hint b{color:var(--signal); display:block; font-size:15px; letter-spacing:.1em; margin-bottom:8px;}
+
+  #errBox{
+    position:fixed; left:16px; right:16px; bottom:96px; z-index:25;
+    background:#1a0f0d; border:1px solid #4a2a24; color:#ffb3a8;
+    font-size:12px; padding:12px 14px; border-radius:10px; display:none;
+    line-height:1.5;
+  }
+</style>
+</head>
+<body>
+
+<div id="stage">
+  <video id="video" playsinline muted autoplay></video>
+  <canvas id="canvas"></canvas>
+</div>
+
+<div id="hint">
+  <b>MOTION AMPLIFIER</b>
+  Tap the center button to start the camera.<br>
+  Point at a subject with subtle motion —<br>
+  a pulse, breathing, a vibrating surface.
+</div>
+
+<div id="errBox"></div>
+
+<div id="topbar">
+  <div class="brand"><span class="dot"></span>PULSE</div>
+  <div id="stats">
+    <span><b id="fpsVal">--</b> fps</span>
+    <span><b id="resVal">--</b></span>
+  </div>
+</div>
+
+<div id="dock">
+  <button class="iconbtn" id="flipBtn" title="Switch camera">⟲</button>
+  <button class="iconbtn" id="powerBtn" title="Start / stop">▶</button>
+  <button class="iconbtn" id="settingsBtn" title="Settings">⚙</button>
+</div>
+
+<div id="overlay"></div>
+<div id="sheet">
+  <div class="grabber"></div>
+  <h2>Amplification Settings</h2>
+
+  <div class="field">
+    <div class="field-head"><label>Amplification factor</label><span class="val" id="ampVal">20×</span></div>
+    <input type="range" id="ampSlider" min="1" max="100" step="1" value="20">
+    <div class="field-sub">How strongly the filtered signal is added back to the image. Higher values reveal smaller motion but amplify noise.</div>
+  </div>
+
+  <div class="field">
+    <div class="field-head"><label>Center frequency</label><span class="val" id="freqVal">1.20 Hz</span></div>
+    <input type="range" id="freqSlider" min="0.1" max="15" step="0.05" value="1.2">
+    <div class="field-sub">The frequency of motion to isolate. ~1–1.7 Hz ≈ resting heart rate, ~0.2–0.4 Hz ≈ breathing.</div>
+    <div class="presets">
+      <button class="preset" data-f="0.3" data-bw="0.3">Breathing</button>
+      <button class="preset" data-f="1.2" data-bw="0.8">Pulse</button>
+      <button class="preset" data-f="5" data-bw="4">Vibration</button>
+    </div>
+  </div>
+
+  <div class="field">
+    <div class="field-head"><label>Bandwidth</label><span class="val" id="bwVal">0.80 Hz</span></div>
+    <input type="range" id="bwSlider" min="0.05" max="8" step="0.05" value="0.8">
+    <div class="field-sub">Width of the frequency band around the center frequency that gets amplified.</div>
+  </div>
+
+  <div class="field">
+    <div class="field-head"><label>Camera quality</label><span class="val" id="qualVal">720p</span></div>
+    <input type="range" id="qualSlider" min="0" max="2" step="1" value="1">
+    <div class="field-sub">Lower resolution often unlocks a higher frame rate from your camera, which improves amplification accuracy.</div>
+  </div>
+
+  <div class="rowbtns">
+    <button class="btn" id="resetBtn">Reset filter</button>
+    <button class="btn primary" id="closeSheetBtn">Done</button>
+  </div>
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  const video = document.getElementById('video');
+  const canvas = document.getElementById('canvas');
+  const hint = document.getElementById('hint');
+  const errBox = document.getElementById('errBox');
+  const fpsVal = document.getElementById('fpsVal');
+  const resVal = document.getElementById('resVal');
+  const powerBtn = document.getElementById('powerBtn');
+  const flipBtn = document.getElementById('flipBtn');
+  const settingsBtn = document.getElementById('settingsBtn');
+  const overlay = document.getElementById('overlay');
+  const sheet = document.getElementById('sheet');
+  const closeSheetBtn = document.getElementById('closeSheetBtn');
+  const resetBtn = document.getElementById('resetBtn');
+
+  const ampSlider = document.getElementById('ampSlider');
+  const freqSlider = document.getElementById('freqSlider');
+  const bwSlider = document.getElementById('bwSlider');
+  const qualSlider = document.getElementById('qualSlider');
+  const ampVal = document.getElementById('ampVal');
+  const freqVal = document.getElementById('freqVal');
+  const bwVal = document.getElementById('bwVal');
+  const qualVal = document.getElementById('qualVal');
+
+  const QUALS = [
+    {label:'480p', w:640,  h:480},
+    {label:'720p', w:1280, h:720},
+    {label:'1080p',w:1920, h:1080}
+  ];
+
+  const settings = {
+    amp: parseFloat(ampSlider.value),
+    freq: parseFloat(freqSlider.value),
+    bw: parseFloat(bwSlider.value),
+    qualIdx: parseInt(qualSlider.value,10)
+  };
+
+  let facingMode = 'environment';
+  let stream = null;
+  let running = false;
+  let gl = null;
+  let procW = 0, procH = 0;
+  let needsInit = true; // whether filter state must be seeded from current frame
+
+  function showError(msg){
+    errBox.textContent = msg;
+    errBox.style.display = 'block';
+  }
+  function clearError(){ errBox.style.display = 'none'; }
+
+  // ---------------------------------------------------------------
+  // WebGL setup
+  // ---------------------------------------------------------------
+  const VERT_SRC = `
+    attribute vec2 a_pos;
+    varying vec2 v_uv;
+    void main(){
+      v_uv = a_pos * 0.5 + 0.5;
+      gl_Position = vec4(a_pos, 0.0, 1.0);
+    }
+  `;
+
+  // Updates one temporal low-pass state texture: L_new = L_old + alpha*(current - L_old)
+  const UPDATE_SRC = `
+    precision mediump float;
+    varying vec2 v_uv;
+    uniform sampler2D u_current;
+    uniform sampler2D u_prevLow;
+    uniform float u_alpha;
+    void main(){
+      vec4 cur = texture2D(u_current, v_uv);
+      vec4 prev = texture2D(u_prevLow, v_uv);
+      gl_FragColor = prev + u_alpha * (cur - prev);
+    }
+  `;
+
+  // band = lowHigh - lowLow  (difference of low-pass filters => band-pass)
+  // output = current + amp * band
+  const COMPOSE_SRC = `
+    precision mediump float;
+    varying vec2 v_uv;
+    uniform sampler2D u_current;
+    uniform sampler2D u_lowHigh;
+    uniform sampler2D u_lowLow;
+    uniform float u_amp;
+    void main(){
+      vec3 cur = texture2D(u_current, v_uv).rgb;
+      vec3 lh = texture2D(u_lowHigh, v_uv).rgb;
+      vec3 ll = texture2D(u_lowLow, v_uv).rgb;
+      vec3 band = lh - ll;
+      vec3 outc = cur + u_amp * band;
+      gl_FragColor = vec4(clamp(outc, 0.0, 1.0), 1.0);
+    }
+  `;
+
+  function compileShader(gl, type, src){
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if(!gl.getShaderParameter(sh, gl.COMPILE_STATUS)){
+      const info = gl.getShaderInfoLog(sh);
+      gl.deleteShader(sh);
+      throw new Error('Shader compile error: ' + info);
+    }
+    return sh;
+  }
+  function linkProgram(gl, vsSrc, fsSrc){
+    const vs = compileShader(gl, gl.VERTEX_SHADER, vsSrc);
+    const fs = compileShader(gl, gl.FRAGMENT_SHADER, fsSrc);
+    const prog = gl.createProgram();
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if(!gl.getProgramParameter(prog, gl.LINK_STATUS)){
+      throw new Error('Program link error: ' + gl.getProgramInfoLog(prog));
+    }
+    return prog;
+  }
+
+  let updateProgram, composeProgram, quadBuffer;
+  let uUpd = {}, uComp = {};
+  let curTex = null;
+  let L1 = null, L2 = null; // {read:{tex,fb}, write:{tex,fb}}
+
+  function initGLContext(){
+    gl = canvas.getContext('webgl', {
+      preserveDrawingBuffer:false,
+      antialias:false,
+      alpha:false,
+      powerPreference:'high-performance'
+    }) || canvas.getContext('experimental-webgl');
+    if(!gl) throw new Error('WebGL is not supported on this device/browser.');
+
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+    updateProgram = linkProgram(gl, VERT_SRC, UPDATE_SRC);
+    composeProgram = linkProgram(gl, VERT_SRC, COMPOSE_SRC);
+
+    quadBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1,-1,  1,-1,  -1,1,  1,1
+    ]), gl.STATIC_DRAW);
+
+    uUpd.current = gl.getUniformLocation(updateProgram, 'u_current');
+    uUpd.prevLow = gl.getUniformLocation(updateProgram, 'u_prevLow');
+    uUpd.alpha   = gl.getUniformLocation(updateProgram, 'u_alpha');
+    uUpd.pos     = gl.getAttribLocation(updateProgram, 'a_pos');
+
+    uComp.current = gl.getUniformLocation(composeProgram, 'u_current');
+    uComp.lowHigh = gl.getUniformLocation(composeProgram, 'u_lowHigh');
+    uComp.lowLow  = gl.getUniformLocation(composeProgram, 'u_lowLow');
+    uComp.amp     = gl.getUniformLocation(composeProgram, 'u_amp');
+    uComp.pos     = gl.getAttribLocation(composeProgram, 'a_pos');
+  }
+
+  function createTex(w, h, data){
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    if(data){
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, data);
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+  function createFBOPair(w, h){
+    function one(){
+      const tex = createTex(w, h, null);
+      const fb = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+      return {tex, fb};
+    }
+    return { read: one(), write: one() };
+  }
+  function swap(pair){
+    const tmp = pair.read;
+    pair.read = pair.write;
+    pair.write = tmp;
+  }
+
+  function allocateBuffers(w, h){
+    procW = w; procH = h;
+    canvas.width = w;
+    canvas.height = h;
+    curTex = createTex(w, h, null);
+    L1 = createFBOPair(w, h);
+    L2 = createFBOPair(w, h);
+    needsInit = true;
+  }
+
+  function drawQuad(posLoc){
+    gl.bindBuffer(gl.ARRAY_BUFFER, quadBuffer);
+    gl.enableVertexAttribArray(posLoc);
+    gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+  }
+
+  function uploadCurrentFrame(){
+    gl.bindTexture(gl.TEXTURE_2D, curTex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+  }
+
+  function copyInto(targetFB){
+    // Runs the update shader with alpha=1, which just copies u_current straight through.
+    gl.bindFramebuffer(gl.FRAMEBUFFER, targetFB);
+    gl.viewport(0,0,procW,procH);
+    gl.useProgram(updateProgram);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, curTex);
+    gl.uniform1i(uUpd.current, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, curTex);
+    gl.uniform1i(uUpd.prevLow, 1);
+    gl.uniform1f(uUpd.alpha, 1.0);
+    drawQuad(uUpd.pos);
+  }
+
+  function seedFilters(){
+    uploadCurrentFrame();
+    copyInto(L1.read.fb);
+    copyInto(L2.read.fb);
+    needsInit = false;
+  }
+
+  function renderFrame(dt){
+    uploadCurrentFrame();
+
+    if(needsInit){
+      copyInto(L1.read.fb);
+      copyInto(L2.read.fb);
+      needsInit = false;
+    }
+
+    const fLow = Math.max(0.02, settings.freq - settings.bw/2);
+    const fHigh = Math.max(fLow + 0.02, settings.freq + settings.bw/2);
+    const alphaHigh = dt / ((1/(2*Math.PI*fHigh)) + dt);
+    const alphaLow  = dt / ((1/(2*Math.PI*fLow))  + dt);
+
+    // Update L1 = low-pass at fHigh
+    gl.bindFramebuffer(gl.FRAMEBUFFER, L1.write.fb);
+    gl.viewport(0,0,procW,procH);
+    gl.useProgram(updateProgram);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, curTex);
+    gl.uniform1i(uUpd.current, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, L1.read.tex);
+    gl.uniform1i(uUpd.prevLow, 1);
+    gl.uniform1f(uUpd.alpha, alphaHigh);
+    drawQuad(uUpd.pos);
+    swap(L1);
+
+    // Update L2 = low-pass at fLow
+    gl.bindFramebuffer(gl.FRAMEBUFFER, L2.write.fb);
+    gl.viewport(0,0,procW,procH);
+    gl.useProgram(updateProgram);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, curTex);
+    gl.uniform1i(uUpd.current, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, L2.read.tex);
+    gl.uniform1i(uUpd.prevLow, 1);
+    gl.uniform1f(uUpd.alpha, alphaLow);
+    drawQuad(uUpd.pos);
+    swap(L2);
+
+    // Compose to screen
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0,0,canvas.width,canvas.height);
+    gl.useProgram(composeProgram);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, curTex);
+    gl.uniform1i(uComp.current, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, L1.read.tex);
+    gl.uniform1i(uComp.lowHigh, 1);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, L2.read.tex);
+    gl.uniform1i(uComp.lowLow, 2);
+    gl.uniform1f(uComp.amp, settings.amp);
+    drawQuad(uComp.pos);
+  }
+
+  // ---------------------------------------------------------------
+  // Camera
+  // ---------------------------------------------------------------
+  async function startCamera(){
+    clearError();
+    const q = QUALS[settings.qualIdx];
+    const constraints = {
+      audio:false,
+      video:{
+        facingMode: facingMode,
+        width: {ideal:q.w},
+        height:{ideal:q.h},
+        frameRate: {ideal:60, min:15}
+      }
+    };
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    const track = stream.getVideoTracks()[0];
+
+    // Try to push the track to its maximum reported frame rate.
+    try{
+      const caps = track.getCapabilities ? track.getCapabilities() : null;
+      if(caps && caps.frameRate && caps.frameRate.max){
+        await track.applyConstraints({ frameRate: caps.frameRate.max });
+      }
+    }catch(e){ /* not fatal */ }
+
+    video.srcObject = stream;
+    await video.play();
+
+    await new Promise(res=>{
+      if(video.readyState >= 2) return res();
+      video.onloadedmetadata = ()=>res();
+    });
+
+    allocateBuffers(video.videoWidth, video.videoHeight);
+
+    const s = track.getSettings ? track.getSettings() : {};
+    resVal.textContent = video.videoWidth + '×' + video.videoHeight;
+  }
+
+  function stopCamera(){
+    if(stream){
+      stream.getTracks().forEach(t=>t.stop());
+      stream = null;
+    }
+  }
+
+  // ---------------------------------------------------------------
+  // Main loop
+  // ---------------------------------------------------------------
+  let lastT = null;
+  let fpsSmooth = 0;
+  let rvfcId = null, rafId = null;
+
+  function loopStep(now){
+    if(!running) return;
+    if(lastT == null) lastT = now;
+    let dt = (now - lastT) / 1000;
+    lastT = now;
+    dt = Math.max(0.004, Math.min(dt, 0.5)); // clamp for stability
+
+    const instFps = 1/dt;
+    fpsSmooth = fpsSmooth === 0 ? instFps : (fpsSmooth*0.9 + instFps*0.1);
+    fpsVal.textContent = Math.round(fpsSmooth);
+
+    try{
+      renderFrame(dt);
+    }catch(e){
+      showError('Render error: ' + e.message);
+      stopApp();
+      return;
+    }
+
+    scheduleNext();
+  }
+
+  function scheduleNext(){
+    if(video.requestVideoFrameCallback){
+      rvfcId = video.requestVideoFrameCallback((now, meta)=>loopStep(now));
+    } else {
+      rafId = requestAnimationFrame((now)=>loopStep(now));
+    }
+  }
+
+  async function startApp(){
+    hint.style.display = 'none';
+    try{
+      if(!gl) initGLContext();
+      await startCamera();
+      running = true;
+      lastT = null;
+      powerBtn.classList.add('live');
+      powerBtn.textContent = '■';
+      scheduleNext();
+    }catch(e){
+      running = false;
+      powerBtn.classList.remove('live');
+      powerBtn.textContent = '▶';
+      hint.style.display = 'block';
+      let msg = e.message || String(e);
+      if(location.protocol !== 'https:' && location.hostname !== 'localhost'){
+        msg = 'Camera access requires HTTPS (or localhost). Host this file over HTTPS to use it. ' + msg;
+      }
+      showError(msg);
+    }
+  }
+
+  function stopApp(){
+    running = false;
+    powerBtn.classList.remove('live');
+    powerBtn.textContent = '▶';
+    if(rvfcId && video.cancelVideoFrameCallback) video.cancelVideoFrameCallback(rvfcId);
+    if(rafId) cancelAnimationFrame(rafId);
+    stopCamera();
+    hint.style.display = 'block';
+  }
+
+  // ---------------------------------------------------------------
+  // UI wiring
+  // ---------------------------------------------------------------
+  function fmtHz(v){ return v.toFixed(2) + ' Hz'; }
+
+  function syncLabels(){
+    ampVal.textContent = settings.amp + '×';
+    freqVal.textContent = fmtHz(settings.freq);
+    bwVal.textContent = fmtHz(settings.bw);
+    qualVal.textContent = QUALS[settings.qualIdx].label;
+  }
+  syncLabels();
+
+  ampSlider.addEventListener('input', ()=>{
+    settings.amp = parseFloat(ampSlider.value);
+    syncLabels();
+  });
+  freqSlider.addEventListener('input', ()=>{
+    settings.freq = parseFloat(freqSlider.value);
+    syncLabels();
+  });
+  bwSlider.addEventListener('input', ()=>{
+    settings.bw = parseFloat(bwSlider.value);
+    syncLabels();
+  });
+  qualSlider.addEventListener('change', async ()=>{
+    settings.qualIdx = parseInt(qualSlider.value,10);
+    syncLabels();
+    if(running){
+      stopCamera();
+      try{ await startCamera(); }catch(e){ showError(e.message); }
+    }
+  });
+
+  document.querySelectorAll('.preset').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const f = parseFloat(btn.dataset.f);
+      const bw = parseFloat(btn.dataset.bw);
+      settings.freq = f; settings.bw = bw;
+      freqSlider.value = f; bwSlider.value = bw;
+      syncLabels();
+    });
+  });
+
+  function openSheet(){ overlay.classList.add('open'); sheet.classList.add('open'); }
+  function closeSheet(){ overlay.classList.remove('open'); sheet.classList.remove('open'); }
+  settingsBtn.addEventListener('click', openSheet);
+  overlay.addEventListener('click', closeSheet);
+  closeSheetBtn.addEventListener('click', closeSheet);
+
+  resetBtn.addEventListener('click', ()=>{
+    needsInit = true;
+    closeSheet();
+  });
+
+  powerBtn.addEventListener('click', ()=>{
+    if(running) stopApp(); else startApp();
+  });
+
+  flipBtn.addEventListener('click', async ()=>{
+    facingMode = (facingMode === 'environment') ? 'user' : 'environment';
+    if(running){
+      stopCamera();
+      try{ await startCamera(); }catch(e){ showError(e.message); }
+    }
+  });
+
+  window.addEventListener('resize', ()=>{
+    // canvas CSS sizing is handled by object-fit; drawing buffer stays at capture resolution.
+  });
+
+})();
+</script>
+</body>
+</html>
